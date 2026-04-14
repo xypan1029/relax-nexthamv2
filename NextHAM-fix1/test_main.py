@@ -154,7 +154,7 @@ def postprocess_inference_outputs(save_dir, nspin=4):
     for path in save_dir:
         if path:
             try:
-                _postprocess_single_output(path, nspin=nspin, keep_original_band_plot=False)
+                _postprocess_single_output(path, nspin=nspin, keep_original_band_plot=True)
             except Exception as e:
                 print(f'  [pyatb][error] {path}: {e}', flush=True)
                 raise

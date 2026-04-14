@@ -432,7 +432,7 @@ def main(args):
     ''' Network '''
     create_model = model_entrypoint(args.model_name)
 
-    devices = ['cuda:9']
+    devices = ['cuda:0']
 
     models = []
     try:

@@ -1,1 +1,0 @@
-/home/meditator/workflow/data/test/dopant3/out/data_0_20260407_200305/output_inference.pth

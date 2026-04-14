@@ -8,9 +8,15 @@ __pycache__/
 *.pdf
 *.png
 *.zip
+*.tmp
 
 Out/
 test/
+test1/
+test1_no/
+batch_gap_eval_runs/
+STRU.cif
+ase_sort.dat
 
 NextHAM-fix1/__pycache__/
 NextHAM-fix1/Out/
@@ -23,6 +29,11 @@ NextHAM-fix1/train_res/
 NextHAM-fix1/train_finetune_res/
 NextHAM-fix1/train_hse_finetune_res/
 NextHAM-fix1/train_pbe_100_res/debug.log
+NextHAM-fix1/train_pbe_100_res_bak/
+NextHAM-fix1/models.pth
+NextHAM-fix1/target.txt
+NextHAM-fix1/test_res.txt
+NextHAM-fix1/datasets/*.txt
 
 equiformer_ef/__pycache__/
 equiformer_ef/abacus_test/

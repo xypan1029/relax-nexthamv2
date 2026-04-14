@@ -3,6 +3,7 @@ import numpy as np
 import re
 import os
 import json
+import time
 from ase.io import read, write
 from pyatb.kpt import kpoint_generator
 from pyatb import RANK, COMM, SIZE, OUTPUT_PATH, RUNNING_LOG, timer
@@ -27,6 +28,21 @@ class plot_band:
         self.save_path = save_path
         self.band_summary = None
         self.gap_mp_grid = (20, 20, 20)
+        self.max_kpoint_num = int(os.environ.get('NEXTHAM_PYATB_MAX_KPOINT_NUM', '8000'))
+
+    def _log_parallel_setup(self):
+        if RANK != 0:
+            return
+        omp_threads = os.environ.get('OMP_NUM_THREADS')
+        openblas_threads = os.environ.get('OPENBLAS_NUM_THREADS')
+        mkl_threads = os.environ.get('MKL_NUM_THREADS')
+        print(
+            'pyatb backend: CPU-only (OpenBLAS/LAPACKE/OpenMP), '
+            f'MPI ranks = {SIZE}, max_kpoint_num = {self.max_kpoint_num}, '
+            f'OMP_NUM_THREADS = {omp_threads}, OPENBLAS_NUM_THREADS = {openblas_threads}, '
+            f'MKL_NUM_THREADS = {mkl_threads}',
+            flush=True,
+        )
 
     def _read_nelec_from_running_log(self):
         candidates = [
@@ -59,7 +75,7 @@ class plot_band:
         k_vect2 = np.array([0.0, 1.0, 0.0], dtype=float)
         k_vect3 = np.array([0.0, 0.0, 1.0], dtype=float)
         k_generator = kpoint_generator.mp_generator(
-            8000,
+            self.max_kpoint_num,
             k_start,
             k_vect1,
             k_vect2,
@@ -93,6 +109,23 @@ class plot_band:
         k_all = COMM.reduce(k_local_all, root=0, op=op_gather_numpy)
         eig_all = COMM.reduce(eig_local_all, root=0, op=op_gather_numpy)
         return k_all, eig_all
+
+    def _collect_eigenvalues_on_kline(self, m_tb1, kline):
+        eig_local_all = []
+        for ik in kline:
+            ik_process = kpoint_generator.kpoints_in_different_process(SIZE, RANK, ik)
+            if ik_process.k_direct_coor_local.shape[0]:
+                eig_local = m_tb1.tb_solver.diago_H_eigenvaluesOnly(ik_process.k_direct_coor_local)
+            else:
+                eig_local = np.zeros((0, m_tb1.tb_solver.basis_num), dtype=np.float64)
+            eig_local_all.append(eig_local)
+
+        if eig_local_all:
+            eig_local_all = np.concatenate(eig_local_all, axis=0)
+        else:
+            eig_local_all = np.zeros((0, m_tb1.tb_solver.basis_num), dtype=np.float64)
+
+        return COMM.reduce(eig_local_all, root=0, op=op_gather_numpy)
 
     def _estimate_mu_from_mp_grid(self, m_tb1, mp_grid=(8, 8, 8), temperature=0.0):
         nelec = self._read_nelec_from_running_log()
@@ -284,18 +317,19 @@ class plot_band:
             kpoint_num_in_line_list.append(int(kpoint_num_in_line[ii]))
         high_symmetry_kpoint = np.stack(high_symmetry_kpoint_list, axis=0)
         kpoint_num_in_line = np.array(kpoint_num_in_line_list)
-        kline = kpoint_generator.line_generator(8000, high_symmetry_kpoint, kpoint_num_in_line)
+        kline = kpoint_generator.line_generator(self.max_kpoint_num, high_symmetry_kpoint, kpoint_num_in_line)
         return kpt_output, kpoint_label, kpoint_num_in_line, kline, lattice_vector
     
     def cal_band(self):
         kpt_output, kpoint_label, kpoint_num_in_line, kline, lattice_vector = self.generate_kline()
+        self._log_parallel_setup()
 
         m_tb1 = pyatb.init_tb(
                 package = 'ABACUS',
                 nspin = self.nspin,
                 lattice_constant = 1,
                 lattice_vector = lattice_vector,
-                max_kpoint_num = 8000,
+                max_kpoint_num = self.max_kpoint_num,
                 isSparse = False,
                 HR_route = self.hr1,
                 HR_unit = 'Ry',
@@ -305,26 +339,25 @@ class plot_band:
                 rR_unit = 'Bohr',
         )
 
+        t0 = time.perf_counter()
         self.mu, self.nelec = self._estimate_mu_from_mp_grid(m_tb1)
+        t1 = time.perf_counter()
         if RANK == 0:
             print(f'Start to calculate band structure (estimated mu = {self.mu:.10f} eV, nelec = {self.nelec:.1f})', flush=True)
             print(f'Band gap analysis will scan full k-grid: {self.gap_mp_grid}', flush=True)
+            print(f'Mu estimation finished in {t1 - t0:.2f} s', flush=True)
         COMM.Barrier()
 
-        for ik in kline:
-            ik_process = kpoint_generator.kpoints_in_different_process(SIZE, RANK, ik)
-            kpoint_num = ik_process.k_direct_coor_local.shape[0]
-
-            if kpoint_num:
-                eigenvalues1= m_tb1.tb_solver.diago_H_eigenvaluesOnly(ik_process.k_direct_coor_local)
-            else:
-                eigenvalues1 = np.zeros((0, m_tb1.tb_solver.basis_num), dtype=np.float64)
-
-        band1 = COMM.reduce(eigenvalues1, root=0, op=op_gather_numpy)
+        t2 = time.perf_counter()
+        band1 = self._collect_eigenvalues_on_kline(m_tb1, kline)
+        t3 = time.perf_counter()
         grid_k_all, grid_band_all = self._collect_eigenvalues_on_mp_grid(m_tb1, self.gap_mp_grid)
+        t4 = time.perf_counter()
 
         if RANK == 0:
             print('Band structure calculated finished', flush=True)
+            print(f'Line-band diagonalization finished in {t3 - t2:.2f} s', flush=True)
+            print(f'Full-k gap scan finished in {t4 - t3:.2f} s', flush=True)
             band1_name = os.path.join(self.save_path, 'band1.txt')
             np.savetxt(band1_name, band1)
             self.line_band_kpoint_count = int(band1.shape[0])
